@@ -91,7 +91,8 @@ COL_GROUPS = {
                      "순부채/EBITDA", "이자보상배율"],
     "현금흐름": ["FCF(B)", "FCF수익률(%)", "FCF마진(%)", "현금전환율(%)"],
     "주주환원": ["배당수익률(%)", "자사주(B)", "자사주수익률(%)", "총주주환원율(%)", "주식수변동(%)"],
-    "애널리스트": ["목표주가($)", "상승여력(%)", "애널리스트수", "실적발표일", "D-day"],
+    "애널리스트": ["목표주가($)", "상승여력(%)", "애널리스트수", "매수의견", "보유의견", "매도의견",
+                  "매수비율(%)", "실적발표일", "D-day"],
 }
 ALL_COLS = [c for g in COL_GROUPS.values() for c in g]
 
@@ -108,6 +109,7 @@ FMT = {
     "배당수익률(%)": "{:.2f}", "자사주(B)": "{:,.2f}", "자사주수익률(%)": "{:.2f}",
     "총주주환원율(%)": "{:.2f}", "주식수변동(%)": "{:+.2f}",
     "목표주가($)": "{:,.2f}", "상승여력(%)": "{:+.1f}", "애널리스트수": "{:.0f}",
+    "매수의견": "{:.0f}", "보유의견": "{:.0f}", "매도의견": "{:.0f}", "매수비율(%)": "{:.0f}",
 }
 
 # (방향, 좋음기준, 나쁨기준)  방향 high = 클수록 좋음
@@ -126,6 +128,7 @@ TH = {
     "배당수익률(%)": ("high", 3, None), "자사주수익률(%)": ("high", 3, None),
     "총주주환원율(%)": ("high", 4, 1), "주식수변동(%)": ("low", -1, 1),
     "상승여력(%)": ("high", 20, 0), "애널리스트수": ("high", 15, 3),
+    "매수비율(%)": ("high", 70, 40),
 }
 
 # ============================================================
@@ -473,7 +476,7 @@ def parse_list(text):
 # 데이터 받아오기
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_one(sym):
+def _fetch_base(sym):
     d = {c: None for c in ALL_COLS}
     d["티커"] = sym
     d["종목명"] = NAME_MAP.get(sym, sym)
@@ -765,6 +768,131 @@ def fetch_one(sym):
     d["데이터출처"] = "+".join(sorted(set(src))) if src else "실패"
     return d
 
+# ============================================================
+# 성장 전망 · 애널리스트 의견 보충 (막히면 다른 경로로 다시 받기)
+# ============================================================
+def _rv(x):
+    """야후 값이 {"raw": 1.2} 모양이어도 숫자로 꺼내기"""
+    if isinstance(x, dict):
+        x = x.get("raw")
+    return _f(x)
+
+def _qs_json(sym):
+    """야후 '분석' 자료를 한 번에 받기 (성장 전망 + 의견 + 목표주가)"""
+    try:
+        from yfinance.data import YfData
+    except Exception:
+        return None
+    url = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/%s" % sym
+    params = {"modules": "earningsTrend,recommendationTrend,financialData",
+              "formatted": "false", "lang": "en-US", "region": "US",
+              "corsDomain": "finance.yahoo.com"}
+    try:
+        js = YfData().get_raw_json(url, params=params)
+    except Exception:
+        return None
+    try:
+        res = ((js or {}).get("quoteSummary") or {}).get("result") or []
+        return res[0] if res and isinstance(res[0], dict) else None
+    except Exception:
+        return None
+
+def _extra_once(sym):
+    """성공하면 dict(빈 dict 가능), 연결 자체가 실패하면 None"""
+    out = {}
+    ok = False
+    q = _qs_json(sym)
+    if q is not None:
+        ok = True
+        for t in ((q.get("earningsTrend") or {}).get("trend") or []):
+            per_ = t.get("period")
+            if per_ not in ("0y", "+1y"):
+                continue
+            yr = "올해" if per_ == "0y" else "내년"
+            rg = _rv((t.get("revenueEstimate") or {}).get("growth"))
+            eg = _rv((t.get("earningsEstimate") or {}).get("growth"))
+            if eg is None:
+                eg = _rv(t.get("growth"))
+            if rg is not None:
+                out["매출성장 %s(E,%%)" % yr] = rg * 100.0
+            if eg is not None:
+                out["EPS성장 %s(E,%%)" % yr] = eg * 100.0
+            if per_ == "+1y" or "추정상향(30일)" not in out:
+                rv = t.get("epsRevisions") or {}
+                up = _rv(rv.get("upLast30days"))
+                dn = _rv(rv.get("downLast30days"))
+                if up is not None:
+                    out["추정상향(30일)"] = up
+                if dn is not None:
+                    out["추정하향(30일)"] = dn
+        for t in ((q.get("recommendationTrend") or {}).get("trend") or []):
+            if t.get("period") == "0m":
+                out["_rec"] = [_rv(t.get(k)) or 0 for k in
+                               ("strongBuy", "buy", "hold", "sell", "strongSell")]
+                break
+        fd = q.get("financialData") or {}
+        tg = _rv(fd.get("targetMeanPrice")) or _rv(fd.get("targetMedianPrice"))
+        if tg:
+            out["목표주가($)"] = tg
+        na = _rv(fd.get("numberOfAnalystOpinions"))
+        if na:
+            out["애널리스트수"] = na
+    # 다른 경로: yfinance 기본 기능으로 의견 수 받기
+    if "_rec" not in out:
+        tk = yf.Ticker(sym)
+        for getter in (lambda: tk.recommendations, lambda: tk.recommendations_summary):
+            try:
+                rc = getter()
+                if rc is None or getattr(rc, "empty", True):
+                    continue
+                ok = True
+                row = rc[rc["period"] == "0m"].iloc[0] if "period" in rc.columns and (rc["period"] == "0m").any() else rc.iloc[0]
+                out["_rec"] = [_f(row.get(k)) or 0 for k in
+                               ("strongBuy", "buy", "hold", "sell", "strongSell")]
+                break
+            except Exception:
+                continue
+    return out if ok else None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_extra(sym):
+    for i in range(2):
+        r = _extra_once(sym)
+        if r is not None:
+            return r
+        time.sleep(0.8 + i)
+    # 실패는 보관하지 않음 (다음 조회 때 다시 시도)
+    raise RuntimeError("analysis blocked")
+
+def fetch_one(sym):
+    d = dict(_fetch_base(sym))
+    if d.get("현재가($)") is None:
+        return d
+    try:
+        ex = _fetch_extra(sym)
+    except Exception:
+        ex = {}
+    for k, v in ex.items():
+        if k.startswith("_") or v is None:
+            continue
+        if d.get(k) is None:
+            d[k] = v
+    rec = ex.get("_rec")
+    if rec and sum(rec) > 0:
+        buy = rec[0] + rec[1]
+        hold = rec[2]
+        sell = rec[3] + rec[4]
+        tot = buy + hold + sell
+        d["매수의견"] = buy
+        d["보유의견"] = hold
+        d["매도의견"] = sell
+        d["매수비율(%)"] = buy / tot * 100.0 if tot else None
+        if d.get("애널리스트수") is None:
+            d["애널리스트수"] = tot
+    if d.get("상승여력(%)") is None and d.get("목표주가($)") and d.get("현재가($)"):
+        d["상승여력(%)"] = (d["목표주가($)"] / d["현재가($)"] - 1.0) * 100.0
+    return d
+
 def add_dday(rows):
     today = dt.date.today()
     for r in rows:
@@ -987,6 +1115,12 @@ def style_table(df, color_on):
 
 def show_table(view, color_on, height):
     """종목명 칸을 왼쪽에 고정해서 표를 그림 (좌우로 밀어도 종목명이 보임)"""
+    view = view.copy()
+    for c in view.columns:
+        if c in FMT:
+            view[c] = pd.to_numeric(view[c], errors="coerce")
+        elif c in ("5년출처", "실적발표일", "D-day", "데이터출처"):
+            view[c] = view[c].where(view[c].notna(), "-")
     try:
         cfg = {"종목명": st.column_config.TextColumn("종목명", pinned=True)}
         st.dataframe(style_table(view, color_on), use_container_width=True,
@@ -1058,6 +1192,8 @@ with st.sidebar:
 - **현금전환율** FCF ÷ 순이익. 80% 이상이면 이익이 진짜 현금
 - **총주주환원율** (자사주+배당) ÷ 시가총액. 3~5% 건전
 - **주식수변동** 마이너스여야 내 지분이 늘어남
+- **매수/보유/매도의견** 애널리스트 의견별 인원 (이번 달 기준)
+- **매수비율** 전체 의견 중 매수 비율. 70% 이상이면 강한 매수 분위기
         """)
 
     with st.expander("신호등 색 기준", expanded=False):
@@ -1108,6 +1244,14 @@ with st.sidebar:
                 msgs.append("재무제표: 성공" if fin is not None and not fin.empty else "재무제표: 빈 값")
             except Exception as e:
                 msgs.append("재무제표: 실패 - %s" % e)
+            try:
+                ex = _extra_once("AAPL")
+                if ex is None:
+                    msgs.append("성장전망·의견: 차단됨")
+                else:
+                    msgs.append("성장전망·의견: 성공 (항목 %d개)" % len(ex))
+            except Exception as e:
+                msgs.append("성장전망·의견: 실패 - %s" % e)
             for m in msgs:
                 st.write("- " + m)
 
@@ -1317,6 +1461,9 @@ with t2:
             k2[3].metric("총주주환원율", "-" if d["총주주환원율(%)"] is None else "%.2f%%" % d["총주주환원율(%)"])
             k2[4].metric("실적발표", (d.get("실적발표일") or "-") + ("" if not d.get("D-day") else " (%s)" % d["D-day"]))
 
+            if d.get("매수의견") is not None:
+                st.caption("애널리스트 의견: 매수 %d · 보유 %d · 매도 %d (매수비율 %.0f%%)" % (
+                    d["매수의견"], d["보유의견"] or 0, d["매도의견"] or 0, d.get("매수비율(%)") or 0))
             st.divider()
             cc1, cc2 = st.columns(2)
             with cc1:
@@ -1419,6 +1566,7 @@ with t3:
         ("sc_div",  0.0, "배당수익률 최소 (%)",      "배당수익률(%)",      "ge"),
         ("sc_shy",  0.0, "총주주환원율 최소 (%)",    "총주주환원율(%)",    "ge"),
         ("sc_ups",  0,   "상승여력 최소 (%)",       "상승여력(%)",        "ge"),
+        ("sc_buy",  0,   "매수비율 최소 (%)",       "매수비율(%)",        "ge"),
     ]
     SCR_RANGE = {
         "sc_per": (0, 100, 1), "sc_peg": (0.0, 5.0, 0.1), "sc_roe": (0, 50, 1),
@@ -1428,7 +1576,7 @@ with t3:
         "sc_npm": (0, 50, 1), "sc_dr": (0, 500, 10), "sc_nd": (0.0, 6.0, 0.5),
         "sc_icr": (0, 30, 1), "sc_fcfy": (0.0, 15.0, 0.5), "sc_fcfm": (0, 40, 1),
         "sc_ccr": (0, 150, 5), "sc_div": (0.0, 10.0, 0.5), "sc_shy": (0.0, 15.0, 0.5),
-        "sc_ups": (0, 60, 5),
+        "sc_ups": (0, 60, 5), "sc_buy": (0, 100, 5),
     }
     SCR_LABEL = {k: lb for k, _d, lb, _c, _o in SCR}
     SCR_DEF = {k: d for k, d, _lb, _c, _o in SCR}
@@ -1520,6 +1668,9 @@ with t3:
             _sl("sc_shy")
         with h6:
             _sl("sc_ups")
+        a1, _a2, _a3 = st.columns(3)
+        with a1:
+            _sl("sc_buy")
 
     _on = [x for x in SCR if _f(st.session_state.get(x[0])) not in (None, 0)]
     st.caption("지금 켜진 조건 %d개: %s"
