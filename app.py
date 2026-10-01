@@ -82,7 +82,7 @@ SCREEN_UNIVERSE = ["AAPL","MSFT","NVDA","GOOGL","AMZN","META","TSLA","AVGO","AMD
 # 표 항목 정의
 # ============================================================
 COL_GROUPS = {
-    "기본": ["종목명", "티커", "현재가($)", "시가총액(B)", "데이터출처"],
+    "기본": ["티커", "현재가($)", "시가총액(B)", "데이터출처"],
     "밸류에이션": ["PER", "선행PER", "PBR", "PSR", "PEG"],
     "성장 전망": ["매출성장 올해(E,%)", "매출성장 내년(E,%)", "EPS성장 올해(E,%)",
                  "EPS성장 내년(E,%)", "EPS성장 5년(E,%)", "5년출처", "과거EPS성장(%)",
@@ -95,6 +95,23 @@ COL_GROUPS = {
                   "매수비율(%)", "실적발표일", "D-day"],
 }
 ALL_COLS = [c for g in COL_GROUPS.values() for c in g]
+
+# 항목 세트(프리셋): 버튼 하나로 이 항목들만 표에 보이게 함 (티커는 항상 보임)
+DEFAULT_PRESETS = {
+    "밸류·성장": ["현재가($)", "시가총액(B)", "PER", "선행PER", "PEG",
+                 "매출성장 올해(E,%)", "매출성장 내년(E,%)", "EPS성장 올해(E,%)",
+                 "EPS성장 내년(E,%)", "EPS성장 5년(E,%)"],
+    "애널리스트": ["현재가($)", "목표주가($)", "상승여력(%)", "애널리스트수", "매수의견",
+                  "보유의견", "매도의견", "매수비율(%)", "추정상향(30일)", "추정하향(30일)",
+                  "실적발표일", "D-day"],
+    "재무": ["ROE(%)", "영업이익률(%)", "순이익률(%)", "부채비율(%)", "순부채/EBITDA",
+            "이자보상배율", "FCF(B)", "FCF수익률(%)", "FCF마진(%)", "배당수익률(%)",
+            "총주주환원율(%)"],
+}
+
+def table_height(n):
+    """휴대폰 한 화면에 머리글 + 약 11줄이 보이는 높이"""
+    return min(38 + 35 * max(int(n), 1), 422)
 
 FMT = {
     "현재가($)": "{:,.2f}", "시가총액(B)": "{:,.1f}",
@@ -151,6 +168,7 @@ DEFAULT_SETTINGS = {
     "color": False,
     "sort_col": "(정렬 안 함)",
     "sort_desc": True,
+    "presets": DEFAULT_PRESETS,
 }
 
 def _get_ls():
@@ -224,6 +242,14 @@ def _clean(raw):
     sc = str(raw.get("sort_col", "(정렬 안 함)"))
     out["sort_col"] = sc if (sc in ALL_COLS or sc == "(정렬 안 함)") else "(정렬 안 함)"
     out["sort_desc"] = bool(raw.get("sort_desc", True))
+    ps = raw.get("presets")
+    if isinstance(ps, dict):
+        clean_ps = {}
+        for k, v in ps.items():
+            k = str(k).strip()
+            if k and isinstance(v, list):
+                clean_ps[k] = [c for c in v if c in ALL_COLS]
+        out["presets"] = clean_ps
     return out
 
 # ---------- 기기 간 공유 (GitHub 비밀 메모장 = Gist) ----------
@@ -1114,31 +1140,29 @@ def style_table(df, color_on):
 
 
 def show_table(view, color_on, height):
-    """종목명 칸을 왼쪽에 고정해서 표를 그림 (좌우로 밀어도 종목명이 보임)"""
+    """티커 칸을 왼쪽에 고정해서 표를 그림 (좌우로 밀어도 티커가 보임)"""
     view = view.copy()
+    if "종목명" in view.columns:
+        view = view.drop(columns=["종목명"])
+    if "티커" in view.columns:
+        view = view[["티커"] + [c for c in view.columns if c != "티커"]]
     for c in view.columns:
         if c in FMT:
             view[c] = pd.to_numeric(view[c], errors="coerce")
         elif c in ("5년출처", "실적발표일", "D-day", "데이터출처"):
             view[c] = view[c].where(view[c].notna(), "-")
     try:
-        cfg = {"종목명": st.column_config.TextColumn("종목명", pinned=True)}
+        cfg = {"티커": st.column_config.TextColumn("티커", pinned=True, width="small")}
         st.dataframe(style_table(view, color_on), use_container_width=True,
                      hide_index=True, height=height, column_config=cfg)
         return
     except TypeError:
         pass
-    # 옛 버전 스트림릿: 종목명을 맨 왼쪽 고정칸(인덱스)으로 옮겨서 고정
+    # 옛 버전 스트림릿: 티커를 맨 왼쪽 고정칸(인덱스)으로 옮겨서 고정
     v2 = view.copy()
-    if "종목명" in v2.columns:
-        nm, seen = [], {}
-        for i, x in enumerate(v2["종목명"].astype(str).tolist()):
-            if x in seen:
-                x = "%s (%s)" % (x, v2["티커"].iloc[i] if "티커" in v2.columns else i)
-            seen[x] = 1
-            nm.append(x)
-        v2 = v2.drop(columns=["종목명"])
-        v2.index = pd.Index(nm, name="종목명")
+    if "티커" in v2.columns:
+        v2.index = pd.Index(v2["티커"].astype(str).tolist(), name="티커")
+        v2 = v2.drop(columns=["티커"])
     st.dataframe(style_table(v2, color_on), use_container_width=True, height=height)
 
 
@@ -1167,7 +1191,7 @@ with st.sidebar:
                 st.session_state["S"] = _clean(_raw)
                 st.session_state["_cloud_last"] = _canon(st.session_state["S"])
                 for _k in list(st.session_state.keys()):
-                    if str(_k).startswith(("cbcol_", "ta_", "ren_")) or _k in ("pick_list", "tg_color"):
+                    if str(_k).startswith(("cbcol_", "ta_", "ren_", "pset_")) or _k in ("pick_list", "tg_color", "preset_pick"):
                         del st.session_state[_k]
                 st.rerun()
             else:
@@ -1332,7 +1356,9 @@ with t1:
     st.divider()
 
     # ---- 표에 보일 항목 고르기 (체크로 켜고 끄기) ----
-    FIXED_COLS = ["종목명", "티커"]
+    FIXED_COLS = ["티커"]
+    if not isinstance(S.get("presets"), dict):
+        S["presets"] = json.loads(json.dumps(DEFAULT_PRESETS))
 
     def _cb_key(c):
         return "cbcol_%d" % ALL_COLS.index(c)
@@ -1342,12 +1368,27 @@ with t1:
         if _k not in st.session_state:
             st.session_state[_k] = (_c not in S["hide"])
 
+    def _cur_show():
+        return [c for c in ALL_COLS if c in FIXED_COLS or c not in S["hide"]]
+
+    def _match_preset():
+        cur = set(_cur_show()) - set(FIXED_COLS)
+        for _n, _cs in S["presets"].items():
+            if set(_cs) - set(FIXED_COLS) == cur:
+                return _n
+        return None
+
     def _apply_hide(hide_list):
         hs = set(hide_list)
         S["hide"] = [c for c in ALL_COLS if c in hs and c not in FIXED_COLS]
         for c in ALL_COLS:
             st.session_state[_cb_key(c)] = (c not in S["hide"])
+        st.session_state["preset_pick"] = _match_preset()
         mark_dirty()
+
+    def _apply_preset(name):
+        cols = set(S["presets"].get(name, []))
+        _apply_hide([c for c in ALL_COLS if c not in cols])
 
     def _on_col_cb(col, key):
         hs = set(S["hide"])
@@ -1356,23 +1397,71 @@ with t1:
         else:
             hs.add(col)
         S["hide"] = [c for c in ALL_COLS if c in hs and c not in FIXED_COLS]
+        st.session_state["preset_pick"] = _match_preset()
         mark_dirty()
+
+    def _on_preset_pick():
+        name = st.session_state.get("preset_pick")
+        if name == "(직접 고름)":
+            name = None
+        if name and name in S["presets"]:
+            _apply_preset(name)
+
+    def _on_all_on():
+        _apply_hide([])
+
+    def _on_basic():
+        _apply_hide([c for c in ALL_COLS if c not in COL_GROUPS["기본"]])
+
+    def _on_save_preset():
+        name = str(st.session_state.get("pset_name", "")).strip()
+        if not name:
+            st.session_state["_pset_msg"] = "세트 이름을 적어 주세요."
+            return
+        S["presets"][name] = [c for c in _cur_show() if c not in FIXED_COLS]
+        st.session_state["pset_name"] = ""
+        st.session_state["preset_pick"] = name
+        st.session_state["_pset_msg"] = "'%s' 세트를 저장했습니다." % name
+        mark_dirty()
+
+    def _on_del_preset():
+        name = st.session_state.get("pset_del")
+        if name and name in S["presets"]:
+            S["presets"].pop(name, None)
+            st.session_state.pop("pset_del", None)
+            st.session_state["preset_pick"] = _match_preset()
+            st.session_state["_pset_msg"] = "'%s' 세트를 지웠습니다." % name
+            mark_dirty()
+
+    if "preset_pick" not in st.session_state or (
+            st.session_state.get("preset_pick") not in S["presets"]
+            and st.session_state.get("preset_pick") is not None):
+        st.session_state["preset_pick"] = _match_preset()
 
     show_cols = [c for c in ALL_COLS
                  if c in FIXED_COLS or st.session_state.get(_cb_key(c), c not in S["hide"])]
+
+    # ---- 항목 세트 버튼 한 줄 ----
+    _pnames = list(S["presets"].keys())
+    if _pnames:
+        if hasattr(st, "pills"):
+            st.pills("항목 세트", _pnames, key="preset_pick", on_change=_on_preset_pick,
+                     label_visibility="collapsed")
+        else:
+            _opts = ["(직접 고름)"] + _pnames
+            if st.session_state.get("preset_pick") not in _opts:
+                st.session_state["preset_pick"] = "(직접 고름)"
+            st.radio("항목 세트", _opts, key="preset_pick", on_change=_on_preset_pick,
+                     horizontal=True, label_visibility="collapsed")
 
     o1, o2 = st.columns([1.4, 1])
     with o1:
         with st.popover("표에 보일 항목 (%d개)" % len(show_cols), use_container_width=True):
             b1, b2 = st.columns(2)
             with b1:
-                if st.button("전체 켜기", use_container_width=True):
-                    _apply_hide([])
-                    st.rerun()
+                st.button("전체 켜기", use_container_width=True, on_click=_on_all_on)
             with b2:
-                if st.button("기본만 보기", use_container_width=True):
-                    _apply_hide([c for c in ALL_COLS if c not in COL_GROUPS["기본"]])
-                    st.rerun()
+                st.button("기본만 보기", use_container_width=True, on_click=_on_basic)
             for _g, _cols in COL_GROUPS.items():
                 st.markdown("**%s**" % _g)
                 for _c in _cols:
@@ -1380,6 +1469,17 @@ with t1:
                         continue
                     _k = _cb_key(_c)
                     st.checkbox(_c, key=_k, on_change=_on_col_cb, args=(_c, _k))
+            st.divider()
+            st.markdown("**지금 체크 상태를 세트로 저장**")
+            st.text_input("세트 이름", key="pset_name", placeholder="예: 내 단골 항목")
+            st.button("세트로 저장", use_container_width=True, on_click=_on_save_preset,
+                      help="같은 이름이 있으면 지금 상태로 덮어씁니다.")
+            if _pnames:
+                st.markdown("**세트 지우기**")
+                st.selectbox("지울 세트", _pnames, key="pset_del")
+                st.button("선택한 세트 지우기", use_container_width=True, on_click=_on_del_preset)
+            if st.session_state.get("_pset_msg"):
+                st.caption(st.session_state.pop("_pset_msg"))
     with o2:
         def _on_color():
             S["color"] = st.session_state["tg_color"]
@@ -1413,21 +1513,21 @@ with t1:
                 df[c] = None
         view = df[[c for c in show_cols if c in df.columns]].copy()
         view = view.reset_index(drop=True)
-        show_table(view, S["color"], min(80 + 36 * len(view), 620))
+        show_table(view, S["color"], table_height(len(view)))
         st.caption("표의 머리글을 누르면 그 항목 기준으로 정렬됩니다. - 표시는 야후에 값이 없는 항목입니다.")
 
         if "FCF수익률(%)" in df.columns or "총주주환원율(%)" in df.columns:
             g1, g2 = st.columns(2)
             with g1:
-                sub = df[["종목명", "FCF수익률(%)"]].dropna()
+                sub = df[["티커", "FCF수익률(%)"]].dropna()
                 if len(sub):
                     st.markdown("**FCF 수익률 (%) — 5% 이상이면 매력적**")
-                    st.bar_chart(sub.set_index("종목명"), height=230)
+                    st.bar_chart(sub.set_index("티커"), height=230)
             with g2:
-                sub = df[["종목명", "총주주환원율(%)"]].dropna()
+                sub = df[["티커", "총주주환원율(%)"]].dropna()
                 if len(sub):
                     st.markdown("**총주주환원율 (%) — 3~5%면 건전**")
-                    st.bar_chart(sub.set_index("종목명"), height=230)
+                    st.bar_chart(sub.set_index("티커"), height=230)
     elif run:
         st.error("가져온 데이터가 없습니다. 사이드바의 연결 진단을 눌러보세요.")
 
@@ -1729,10 +1829,10 @@ with t3:
         res = df[m]
         st.success("조건에 맞는 종목 %d개" % len(res))
         if len(res):
-            base = ["종목명", "티커", "현재가($)", "시가총액(B)", "PER", "PEG", "ROE(%)"]
+            base = ["티커", "현재가($)", "시가총액(B)", "PER", "PEG", "ROE(%)"]
             cols = base + [x[3] for x in _on if x[3] not in base]
             out = res[[c for c in cols if c in res.columns]].reset_index(drop=True)
-            show_table(out, S["color"], min(80 + 36 * len(out), 620))
+            show_table(out, S["color"], table_height(len(out)))
             st.caption("아래 티커를 복사해서 ① 탭의 종목 칸에 붙여넣을 수 있습니다.")
             st.code(", ".join(res["티커"].astype(str).tolist()))
 
