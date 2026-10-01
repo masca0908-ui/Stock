@@ -3,7 +3,7 @@
 # 미국주식 대시보드 (야후 파이낸스 기반)
 # - 관심목록 여러 개 저장 / 표에 보일 항목 체크 / 신호등 색 표시 켜고 끄기
 
-import os, json, time, uuid, datetime as dt
+import os, io, json, time, uuid, datetime as dt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -223,6 +223,104 @@ def _clean(raw):
     out["sort_desc"] = bool(raw.get("sort_desc", True))
     return out
 
+# ---------- 기기 간 공유 (GitHub 비밀 메모장 = Gist) ----------
+# Streamlit 설정의 Secrets 에 GITHUB_TOKEN 을 넣어 두면 켜집니다. 없으면 예전 방식 그대로 동작합니다.
+GIST_FILE = "usstock_settings.json"
+
+def _gh_token():
+    try:
+        return str(st.secrets.get("GITHUB_TOKEN", "") or "").strip()
+    except Exception:
+        return ""
+
+def _gh_headers(tok):
+    return {"Authorization": "Bearer %s" % tok,
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28"}
+
+def _gist_id(tok):
+    gid = st.session_state.get("_gist_id")
+    if gid:
+        return gid
+    import requests
+    try:
+        for page in range(1, 4):
+            r = requests.get("https://api.github.com/gists", headers=_gh_headers(tok),
+                             params={"per_page": 100, "page": page}, timeout=10)
+            if r.status_code != 200:
+                st.session_state["_cloud_err"] = "목록 조회 실패 (코드 %s)" % r.status_code
+                return None
+            arr = r.json() or []
+            for g in arr:
+                if GIST_FILE in (g.get("files") or {}):
+                    st.session_state["_gist_id"] = g.get("id")
+                    return g.get("id")
+            if len(arr) < 100:
+                break
+    except Exception as e:
+        st.session_state["_cloud_err"] = "연결 실패 (%s)" % type(e).__name__
+    return None
+
+def _canon(data):
+    return json.dumps(data, ensure_ascii=False, sort_keys=True)
+
+def cloud_on():
+    return bool(_gh_token())
+
+def cloud_load():
+    tok = _gh_token()
+    if not tok:
+        return None
+    gid = _gist_id(tok)
+    if not gid:
+        return None
+    import requests
+    try:
+        r = requests.get("https://api.github.com/gists/%s" % gid, headers=_gh_headers(tok), timeout=10)
+        if r.status_code != 200:
+            st.session_state["_cloud_err"] = "불러오기 실패 (코드 %s)" % r.status_code
+            return None
+        f = (r.json().get("files") or {}).get(GIST_FILE) or {}
+        txt = f.get("content") or ""
+        if f.get("truncated") and f.get("raw_url"):
+            txt = requests.get(f["raw_url"], headers=_gh_headers(tok), timeout=10).text
+        data = json.loads(txt) if txt else None
+        if isinstance(data, dict):
+            st.session_state["_cloud_err"] = ""
+            return data
+    except Exception as e:
+        st.session_state["_cloud_err"] = "불러오기 실패 (%s)" % type(e).__name__
+    return None
+
+def cloud_save(data):
+    tok = _gh_token()
+    if not tok:
+        return
+    can = _canon(data)
+    if can == st.session_state.get("_cloud_last"):
+        return
+    import requests
+    body = {"files": {GIST_FILE: {"content": json.dumps(data, ensure_ascii=False, indent=1)}}}
+    try:
+        gid = _gist_id(tok)
+        if gid:
+            r = requests.patch("https://api.github.com/gists/%s" % gid, headers=_gh_headers(tok),
+                               json=body, timeout=10)
+        else:
+            body["description"] = "미국주식 앱 설정 (자동 저장)"
+            body["public"] = False
+            r = requests.post("https://api.github.com/gists", headers=_gh_headers(tok),
+                              json=body, timeout=10)
+            if r.status_code in (200, 201):
+                st.session_state["_gist_id"] = r.json().get("id")
+        if r.status_code in (200, 201):
+            st.session_state["_cloud_last"] = can
+            st.session_state["_cloud_err"] = ""
+        else:
+            st.session_state["_cloud_err"] = "저장 실패 (코드 %s)" % r.status_code
+    except Exception as e:
+        st.session_state["_cloud_err"] = "저장 실패 (%s)" % type(e).__name__
+
 def load_settings():
     if "S" in st.session_state:
         return st.session_state["S"]
@@ -237,7 +335,11 @@ def load_settings():
     if not uid:
         uid = uuid.uuid4().hex[:12]
     raw = None
-    js = _ls_get(LS_KEY)
+    craw = cloud_load()
+    if craw is not None:
+        raw = craw
+        src = "클라우드 (모든 기기 공유)"
+    js = _ls_get(LS_KEY) if raw is None else None
     if js:
         try:
             raw = json.loads(js) if isinstance(js, str) else js
@@ -260,6 +362,11 @@ def load_settings():
     st.session_state["S"] = S
     st.session_state["_uid"] = uid
     st.session_state["_src"] = src
+    if craw is not None:
+        st.session_state["_cloud_last"] = _canon(S)
+    elif cloud_on() and src != "기본값":
+        # 공유 저장소가 비어 있으면 이 기기의 설정을 처음 한 번 올려 둠
+        st.session_state["_dirty"] = True
     return S
 
 def mark_dirty():
@@ -274,6 +381,7 @@ def persist():
         return
     txt = json.dumps(S, ensure_ascii=False)
     _file_save(uid, S)
+    cloud_save(S)
     _ls_set(UID_KEY, uid)
     _ls_set(LS_KEY, txt)
     try:
@@ -685,6 +793,158 @@ def fetch_many(syms, label="불러오는 중"):
     bar.empty()
     return add_dday(rows), bad
 
+
+# ============================================================
+# 스크리닝 범위 넓히기 (S&P 500 / 러셀 3000)
+# ============================================================
+UNI_OPTS = ["대표 70개 (빠름)", "S&P 500", "S&P 500 + 러셀 3000"]
+_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+ISHARES = {
+    "IVV": "https://www.ishares.com/us/products/239726/ishares-core-sp-500-etf/1467271812596.ajax"
+           "?fileType=csv&fileName=IVV_holdings&dataType=fund",
+    "IWV": "https://www.ishares.com/us/products/239714/ishares-russell-3000-etf/1467271812596.ajax"
+           "?fileType=csv&fileName=IWV_holdings&dataType=fund",
+}
+SP500_BACKUP = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+US_EXCH = {"NMS", "NYQ", "NGM", "NCM", "ASE", "PCX", "BTS", "NAS", "NYS"}
+
+def _norm_tk(t):
+    t = str(t or "").strip().upper().replace(".", "-").replace("/", "-").replace(" ", "")
+    return t if (t and t not in ("-", "NAN") and len(t) <= 7) else ""
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _ishares_list(code):
+    """iShares ETF 보유종목표에서 (티커, 이름) 목록. 비중 큰 순."""
+    import requests
+    try:
+        r = requests.get(ISHARES[code], headers=_UA, timeout=25)
+        if r.status_code != 200:
+            return []
+        txt = r.text.replace("\ufeff", "")
+        pos = txt.find("Ticker,")
+        if pos < 0:
+            return []
+        df = pd.read_csv(io.StringIO(txt[pos:]), on_bad_lines="skip")
+        if "Asset Class" in df.columns:
+            df = df[df["Asset Class"].astype(str).str.strip() == "Equity"]
+        out, seen = [], set()
+        for t, n in zip(df["Ticker"], df.get("Name", df["Ticker"])):
+            t = _norm_tk(t)
+            if t and t not in seen:
+                seen.add(t)
+                out.append((t, str(n).title()))
+        return out
+    except Exception:
+        return []
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _sp500_backup():
+    try:
+        df = pd.read_csv(SP500_BACKUP)
+        out = []
+        for t, n in zip(df["Symbol"], df.get("Security", df["Symbol"])):
+            t = _norm_tk(t)
+            if t:
+                out.append((t, str(n)))
+        return out
+    except Exception:
+        return []
+
+def get_members(uni):
+    """검사 범위에 들어갈 (티커, 이름) 목록"""
+    sp = _ishares_list("IVV") or _sp500_backup()
+    if uni == UNI_OPTS[1]:
+        return sp
+    r3 = _ishares_list("IWV")
+    seen = set(t for t, _ in r3)
+    return r3 + [x for x in sp if x[0] not in seen]
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def yahoo_screen_us(min_mcap=1.0e8, limit=6000):
+    """야후 일괄 검색: 미국 상장 주식 전체를 시가총액 큰 순으로 한 번에 받기"""
+    try:
+        from yfinance import EquityQuery
+    except Exception:
+        try:
+            from yfinance.screener import EquityQuery
+        except Exception:
+            return None
+    try:
+        import inspect
+        params = inspect.signature(yf.screen).parameters
+        q = EquityQuery("and", [EquityQuery("eq", ["region", "us"]),
+                                EquityQuery("gte", ["intradaymarketcap", min_mcap])])
+    except Exception:
+        return None
+    quotes, off, size = [], 0, 250
+    while off < limit:
+        kw = {"size": size, "sortField": "intradaymarketcap", "sortAsc": False}
+        if "offset" in params:
+            kw["offset"] = off
+        res = None
+        for _i in range(3):
+            try:
+                res = yf.screen(q, **kw)
+                break
+            except Exception:
+                time.sleep(1.0)
+        if not res:
+            break
+        page = res.get("quotes") or []
+        quotes.extend(page)
+        if len(page) < size or "offset" not in params:
+            break
+        off += size
+        time.sleep(0.3)
+    rows, seen = [], set()
+    for x in quotes:
+        t = _norm_tk(x.get("symbol"))
+        if not t or t in seen:
+            continue
+        if x.get("quoteType") not in (None, "EQUITY"):
+            continue
+        if x.get("exchange") and x.get("exchange") not in US_EXCH:
+            continue
+        seen.add(t)
+        mc = _f(x.get("marketCap"))
+        rows.append({"티커": t,
+                     "이름": x.get("shortName") or x.get("longName") or t,
+                     "시가총액(B)": mc / 1e9 if mc else None,
+                     "PER": _f(x.get("trailingPE")),
+                     "선행PER": _f(x.get("forwardPE")),
+                     "PBR": _f(x.get("priceToBook"))})
+    if not rows:
+        return None
+    return pd.DataFrame(rows)
+
+def build_stage1(uni):
+    """1차 후보표 (티커, 이름, 시가총액, PER, 선행PER, PBR) 와 방식 설명"""
+    mem = get_members(uni)
+    q = yahoo_screen_us()
+    if q is not None and len(q):
+        if mem:
+            have = set(q["티커"])
+            want = {}
+            for t, n in mem:
+                if t not in have and len(t) >= 4 and (t[:-1] + "-" + t[-1]) in have:
+                    t = t[:-1] + "-" + t[-1]   # BRKB -> BRK-B
+                want[t] = n
+            q = q[q["티커"].isin(want.keys())].copy()
+            how = "야후 일괄 검색 + 지수 구성종목"
+        else:
+            q = q.head(500 if uni == UNI_OPTS[1] else 3000).copy()
+            how = "야후 일괄 검색 (시가총액 상위로 지수 근사)"
+        q = q.sort_values("시가총액(B)", ascending=False, na_position="last")
+        return q.reset_index(drop=True), how
+    if mem:
+        df = pd.DataFrame([{"티커": t, "이름": n, "시가총액(B)": None, "PER": None,
+                            "선행PER": None, "PBR": None} for t, n in mem])
+        return df, "지수 구성종목 목록 (야후 일괄 검색 실패 → 큰 기업 순)"
+    df = pd.DataFrame([{"티커": t, "이름": NAME_MAP.get(t, t), "시가총액(B)": None, "PER": None,
+                        "선행PER": None, "PBR": None} for t in SCREEN_UNIVERSE])
+    return df, "목록을 못 받아 대표 70개로 대신함"
+
 # ============================================================
 # 표 그리기
 # ============================================================
@@ -725,6 +985,29 @@ def style_table(df, color_on):
     return sty.apply(paint, axis=None)
 
 
+def show_table(view, color_on, height):
+    """종목명 칸을 왼쪽에 고정해서 표를 그림 (좌우로 밀어도 종목명이 보임)"""
+    try:
+        cfg = {"종목명": st.column_config.TextColumn("종목명", pinned=True)}
+        st.dataframe(style_table(view, color_on), use_container_width=True,
+                     hide_index=True, height=height, column_config=cfg)
+        return
+    except TypeError:
+        pass
+    # 옛 버전 스트림릿: 종목명을 맨 왼쪽 고정칸(인덱스)으로 옮겨서 고정
+    v2 = view.copy()
+    if "종목명" in v2.columns:
+        nm, seen = [], {}
+        for i, x in enumerate(v2["종목명"].astype(str).tolist()):
+            if x in seen:
+                x = "%s (%s)" % (x, v2["티커"].iloc[i] if "티커" in v2.columns else i)
+            seen[x] = 1
+            nm.append(x)
+        v2 = v2.drop(columns=["종목명"])
+        v2.index = pd.Index(nm, name="종목명")
+    st.dataframe(style_table(v2, color_on), use_container_width=True, height=height)
+
+
 def _wkey(base, seq):
     return "%s_%d" % (base, abs(hash(tuple(seq))) % 100000000)
 
@@ -740,6 +1023,23 @@ st.caption("한글 이름(애플)이나 티커(AAPL) 아무거나 입력하면 �
 with st.sidebar:
     st.markdown("### 설정")
     st.caption("불러온 곳: %s" % st.session_state.get("_src", "기본값"))
+    if cloud_on():
+        st.caption("기기 간 공유: 켜짐 (휴대폰·패드·PC가 같은 목록 사용)")
+        if st.session_state.get("_cloud_err"):
+            st.caption("공유 오류: %s" % st.session_state["_cloud_err"])
+        if st.button("다른 기기에서 바꾼 내용 불러오기", use_container_width=True):
+            _raw = cloud_load()
+            if _raw is not None:
+                st.session_state["S"] = _clean(_raw)
+                st.session_state["_cloud_last"] = _canon(st.session_state["S"])
+                for _k in list(st.session_state.keys()):
+                    if str(_k).startswith(("cbcol_", "ta_", "ren_")) or _k in ("pick_list", "tg_color"):
+                        del st.session_state[_k]
+                st.rerun()
+            else:
+                st.warning("불러오지 못했습니다.")
+    else:
+        st.caption("기기 간 공유: 꺼짐 (GITHUB_TOKEN 설정 필요)")
 
     with st.expander("용어 설명", expanded=False):
         st.markdown("""
@@ -969,8 +1269,7 @@ with t1:
                 df[c] = None
         view = df[[c for c in show_cols if c in df.columns]].copy()
         view = view.reset_index(drop=True)
-        st.dataframe(style_table(view, S["color"]), use_container_width=True,
-                     hide_index=True, height=min(80 + 36 * len(view), 620))
+        show_table(view, S["color"], min(80 + 36 * len(view), 620))
         st.caption("표의 머리글을 누르면 그 항목 기준으로 정렬됩니다. - 표시는 야후에 값이 없는 항목입니다.")
 
         if "FCF수익률(%)" in df.columns or "총주주환원율(%)" in df.columns:
@@ -1082,8 +1381,19 @@ with t2:
 # ============================================================
 with t3:
     st.markdown("### 조건으로 종목 찾기")
-    st.caption("미국 대표 %d개 종목을 검사합니다. 처음 한 번은 1~2분 걸립니다. "
-               "슬라이더를 0으로 두면 그 조건은 무시합니다." % len(SCREEN_UNIVERSE))
+    u1, u2 = st.columns([2, 1])
+    with u1:
+        uni = st.radio("검사 범위", UNI_OPTS, horizontal=True, key="sc_uni")
+    with u2:
+        depth = st.select_slider("자세히 검사할 최대 종목 수", [50, 100, 150, 200, 300], value=100,
+                                 key="sc_depth", disabled=(uni == UNI_OPTS[0]))
+    if uni == UNI_OPTS[0]:
+        st.caption("미국 대표 %d개 종목을 검사합니다. 처음 한 번은 1~2분 걸립니다. "
+                   "슬라이더를 0으로 두면 그 조건은 무시합니다." % len(SCREEN_UNIVERSE))
+    else:
+        st.caption("1차로 전체 종목을 PER·선행PER·PBR·시가총액으로 한 번에 거른 뒤, 남은 종목 중 "
+                   "시가총액 큰 순으로 최대 %d개를 자세히 검사합니다 (약 %d~%d분). "
+                   "검사 중에는 휴대폰 화면을 켜 두세요." % (depth, max(1, depth // 50), max(2, depth // 30)))
 
     # (저장이름, 처음값, 화면에 쓸 이름, 비교할 표 항목, ge=이상 / le=이하)
     SCR = [
@@ -1216,10 +1526,41 @@ with t3:
                % (len(_on), ", ".join(x[2] for x in _on) if _on else "없음"))
 
     if st.button("찾기 시작", type="primary", use_container_width=True, key="scr_run"):
-        _rows3, _ = fetch_many(SCREEN_UNIVERSE, "종목 검사 중")
-        st.session_state["t3_rows"] = _rows3
+        if uni == UNI_OPTS[0]:
+            _rows3, _ = fetch_many(SCREEN_UNIVERSE, "종목 검사 중")
+            st.session_state["t3_rows"] = _rows3
+            st.session_state["t3_meta"] = ""
+        else:
+            with st.spinner("1차: 전체 종목 목록과 기본 지표 받는 중... (30초 안팎)"):
+                base1, how1 = build_stage1(uni)
+            total1 = len(base1)
+            cand = base1
+            # 1차 거름: 일괄 검색에서 받은 항목만, 살짝 넉넉하게 (최종 판단은 2차에서)
+            for _key, _d, _lb, _col, _op in SCR:
+                v = _f(st.session_state.get(_key))
+                if not v or _col not in cand.columns or cand[_col].notna().sum() == 0:
+                    continue
+                if _op == "le":
+                    cand = cand[cand[_col].apply(lambda x, v=v: _f(x) is not None and 0 < _f(x) <= v * 1.15)]
+                else:
+                    cand = cand[cand[_col].apply(lambda x, v=v: _f(x) is not None and _f(x) >= v * 0.85)]
+            pass1 = len(cand)
+            cand = cand.head(int(depth))
+            nm1 = dict(zip(cand["티커"], cand["이름"]))
+            _rows3, _ = fetch_many(cand["티커"].tolist(), "2차: 자세히 검사 중")
+            for r in _rows3:
+                if r.get("종목명") == r.get("티커") and nm1.get(r.get("티커")):
+                    r["종목명"] = nm1[r["티커"]]
+            st.session_state["t3_rows"] = _rows3
+            msg = "%s · 검사 범위 %s개 → 1차 통과 %s개 → 자세히 검사 %d개" % (
+                how1, format(total1, ","), format(pass1, ","), len(cand))
+            if pass1 > len(cand):
+                msg += " (1차 통과가 많아 시가총액 큰 %d개만 봤습니다. 조건을 좁히거나 검사 수를 늘리세요)" % len(cand)
+            st.session_state["t3_meta"] = msg
 
     rows3 = st.session_state.get("t3_rows") or []
+    if st.session_state.get("t3_meta"):
+        st.caption(st.session_state["t3_meta"])
     if rows3:
         df = pd.DataFrame(rows3)
         m = pd.Series(True, index=df.index)
@@ -1240,8 +1581,7 @@ with t3:
             base = ["종목명", "티커", "현재가($)", "시가총액(B)", "PER", "PEG", "ROE(%)"]
             cols = base + [x[3] for x in _on if x[3] not in base]
             out = res[[c for c in cols if c in res.columns]].reset_index(drop=True)
-            st.dataframe(style_table(out, S["color"]), hide_index=True, use_container_width=True,
-                         height=min(80 + 36 * len(out), 620))
+            show_table(out, S["color"], min(80 + 36 * len(out), 620))
             st.caption("아래 티커를 복사해서 ① 탭의 종목 칸에 붙여넣을 수 있습니다.")
             st.code(", ".join(res["티커"].astype(str).tolist()))
 
