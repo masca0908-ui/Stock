@@ -1,6 +1,6 @@
 
 # -*- coding: utf-8 -*-
-# 미국주식 대시보드 (야후 파이낸스 기반)
+# Stock 대시보드 (야후 파이낸스 기반)
 # - 관심목록 여러 개 저장 / 표에 보일 항목 체크 / 신호등 색 표시 켜고 끄기
 
 import os, io, json, time, uuid, datetime as dt
@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-st.set_page_config(page_title="미국주식 한눈에 보기", page_icon="chart_with_upwards_trend",
+st.set_page_config(page_title="Stock", page_icon="chart_with_upwards_trend",
                    layout="wide", initial_sidebar_state="collapsed")
 
 CSS = """
@@ -28,6 +28,29 @@ hr {margin: .7rem 0 !important;}
 @media (max-width: 820px) {
   .block-container {padding-left: .7rem !important; padding-right: 2.6rem !important;}
 }
+/* ---- 하늘색 테마 (버튼·탭·세트 버튼·체크·스위치·슬라이더) ---- */
+button[kind="primary"], button[data-testid="stBaseButton-primary"] {
+  background-color:#0ea5e9 !important; border-color:#0ea5e9 !important; color:#ffffff !important;}
+button[kind="primary"]:hover, button[data-testid="stBaseButton-primary"]:hover {
+  background-color:#0284c7 !important; border-color:#0284c7 !important;}
+button[kind="secondary"]:hover, button[data-testid="stBaseButton-secondary"]:hover,
+button[data-testid="stPopoverButton"]:hover, div[data-testid="stPopover"] button:hover {
+  border-color:#0ea5e9 !important; color:#0284c7 !important;}
+button:focus:not(:active) {border-color:#0ea5e9 !important; color:inherit;}
+.stTabs [aria-selected="true"] {color:#0284c7 !important;}
+.stTabs [aria-selected="true"] p {color:#0284c7 !important;}
+.stTabs [data-baseweb="tab-highlight"] {background-color:#0ea5e9 !important;}
+.stTabs [data-baseweb="tab"]:hover {color:#0284c7 !important;}
+button[data-testid="stBaseButton-pillsActive"], button[kind="pillsActive"] {
+  background-color:#e0f2fe !important; border-color:#0ea5e9 !important; color:#0369a1 !important;}
+button[data-testid="stBaseButton-pills"]:hover, button[kind="pills"]:hover {
+  border-color:#0ea5e9 !important; color:#0284c7 !important;}
+label[data-baseweb="checkbox"] input:checked + div,
+label[data-baseweb="checkbox"] span[aria-checked="true"] {background-color:#0ea5e9 !important; border-color:#0ea5e9 !important;}
+div[data-testid="stCheckbox"] label > span:first-child[style*="rgb(255, 75, 75)"] {background-color:#0ea5e9 !important;}
+div[data-baseweb="slider"] div[role="slider"] {background-color:#0ea5e9 !important;}
+div[data-testid="stSliderThumbValue"] {color:#0284c7 !important;}
+a {color:#0284c7;}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -169,6 +192,7 @@ DEFAULT_SETTINGS = {
     "sort_col": "(정렬 안 함)",
     "sort_desc": True,
     "presets": DEFAULT_PRESETS,
+    "memos": {},
 }
 
 def _get_ls():
@@ -250,6 +274,10 @@ def _clean(raw):
             if k and isinstance(v, list):
                 clean_ps[k] = [c for c in v if c in ALL_COLS]
         out["presets"] = clean_ps
+    mm = raw.get("memos")
+    if isinstance(mm, dict):
+        out["memos"] = {str(k).strip().upper(): str(v) for k, v in mm.items()
+                        if str(k).strip() and str(v).strip()}
     return out
 
 # ---------- 기기 간 공유 (GitHub 비밀 메모장 = Gist) ----------
@@ -1174,7 +1202,7 @@ def _wkey(base, seq):
 # ============================================================
 S = load_settings()
 
-st.title("미국주식 한눈에 보기")
+st.title("Stock")
 st.caption("한글 이름(애플)이나 티커(AAPL) 아무거나 입력하면 됩니다. 시세는 야후 파이낸스 기준 15~20분 지연.")
 
 # ---------------- 사이드바 ----------------
@@ -1191,7 +1219,7 @@ with st.sidebar:
                 st.session_state["S"] = _clean(_raw)
                 st.session_state["_cloud_last"] = _canon(st.session_state["S"])
                 for _k in list(st.session_state.keys()):
-                    if str(_k).startswith(("cbcol_", "ta_", "ren_", "pset_")) or _k in ("pick_list", "tg_color", "preset_pick"):
+                    if str(_k).startswith(("cbcol_", "ta_", "ren_", "pset_", "memo_")) or _k in ("pick_list", "tg_color", "preset_pick"):
                         del st.session_state[_k]
                 st.rerun()
             else:
@@ -1285,7 +1313,7 @@ with st.sidebar:
         st.rerun()
 
 # ---------------- 탭 ----------------
-t1, t2, t3, t4 = st.tabs(["① 관심목록 비교", "② 종목 자세히 보기", "③ 조건으로 찾기", "④ 다른 사이트 확인"])
+t1, t2, t3, t4, t5 = st.tabs(["① 관심목록 비교", "② 종목 자세히 보기", "③ 조건으로 찾기", "④ 다른 사이트 확인", "⑤ 메모"])
 
 # ============================================================
 # 탭 1
@@ -1859,5 +1887,61 @@ with t4:
         for label, url in links:
             st.markdown("- [%s](%s)" % (label, url))
         st.info("앱의 EPS성장 5년(E) 값과 Finviz의 EPS next 5Y를 비교해 보세요. 2%p 안쪽이면 역산이 잘 맞는 것입니다.")
+
+# ============================================================
+# 탭 5: 메모 (종목별 짧은 메모)
+# ============================================================
+with t5:
+    if not isinstance(S.get("memos"), dict):
+        S["memos"] = {}
+    MEMO_ALL = "(메모 쓴 종목 전체)"
+    _mnames = list(S["lists"].keys()) + [MEMO_ALL]
+    if st.session_state.get("memo_pick") not in _mnames:
+        st.session_state["memo_pick"] = S["active"] if S["active"] in _mnames else _mnames[0]
+    _mp = st.selectbox("목록", _mnames, key="memo_pick")
+
+    if _mp == MEMO_ALL:
+        _msyms = sorted(S["memos"].keys())
+    else:
+        _msyms = parse_list(S["lists"].get(_mp, ""))
+
+    if not _msyms:
+        st.info("이 목록에 종목이 없습니다. 종목은 ① 탭에서 넣을 수 있습니다.")
+    else:
+        _mdf = pd.DataFrame({
+            "티커": _msyms,
+            "종목명": [NAME_MAP.get(t, "-") for t in _msyms],
+            "메모": [S["memos"].get(t, "") for t in _msyms],
+        })
+        _mcfg = {
+            "티커": st.column_config.TextColumn("티커", width="small", disabled=True),
+            "종목명": st.column_config.TextColumn("종목명", width="small", disabled=True),
+            "메모": st.column_config.TextColumn("메모", width="large", max_chars=500),
+        }
+        try:
+            _mcfg["티커"] = st.column_config.TextColumn("티커", width="small", disabled=True, pinned=True)
+        except TypeError:
+            pass
+        _medited = st.data_editor(
+            _mdf,
+            key="memo_ed_%d" % (abs(hash(_mp)) % 100000000),
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            height=38 + 35 * len(_msyms),
+            column_config=_mcfg,
+        )
+        _changed = False
+        for _t, _v in zip(_medited["티커"], _medited["메모"]):
+            _v = "" if _v is None or (isinstance(_v, float) and np.isnan(_v)) else str(_v).strip()
+            if _v != S["memos"].get(_t, ""):
+                if _v:
+                    S["memos"][_t] = _v
+                else:
+                    S["memos"].pop(_t, None)
+                _changed = True
+        if _changed:
+            mark_dirty()
+        st.caption("메모 칸을 누르면 바로 쓸 수 있고, 자동으로 저장됩니다. 같은 종목은 어느 목록에서 봐도 같은 메모가 보입니다.")
 
 persist()
