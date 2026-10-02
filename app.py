@@ -28,29 +28,11 @@ hr {margin: .7rem 0 !important;}
 @media (max-width: 820px) {
   .block-container {padding-left: .7rem !important; padding-right: 2.6rem !important;}
 }
-/* ---- 하늘색 테마 (버튼·탭·세트 버튼·체크·스위치·슬라이더) ---- */
+/* ---- 하늘색: 조회하기·찾기 시작·분석하기 같은 주 버튼만 ---- */
 button[kind="primary"], button[data-testid="stBaseButton-primary"] {
   background-color:#0ea5e9 !important; border-color:#0ea5e9 !important; color:#ffffff !important;}
 button[kind="primary"]:hover, button[data-testid="stBaseButton-primary"]:hover {
   background-color:#0284c7 !important; border-color:#0284c7 !important;}
-button[kind="secondary"]:hover, button[data-testid="stBaseButton-secondary"]:hover,
-button[data-testid="stPopoverButton"]:hover, div[data-testid="stPopover"] button:hover {
-  border-color:#0ea5e9 !important; color:#0284c7 !important;}
-button:focus:not(:active) {border-color:#0ea5e9 !important; color:inherit;}
-.stTabs [aria-selected="true"] {color:#0284c7 !important;}
-.stTabs [aria-selected="true"] p {color:#0284c7 !important;}
-.stTabs [data-baseweb="tab-highlight"] {background-color:#0ea5e9 !important;}
-.stTabs [data-baseweb="tab"]:hover {color:#0284c7 !important;}
-button[data-testid="stBaseButton-pillsActive"], button[kind="pillsActive"] {
-  background-color:#e0f2fe !important; border-color:#0ea5e9 !important; color:#0369a1 !important;}
-button[data-testid="stBaseButton-pills"]:hover, button[kind="pills"]:hover {
-  border-color:#0ea5e9 !important; color:#0284c7 !important;}
-label[data-baseweb="checkbox"] input:checked + div,
-label[data-baseweb="checkbox"] span[aria-checked="true"] {background-color:#0ea5e9 !important; border-color:#0ea5e9 !important;}
-div[data-testid="stCheckbox"] label > span:first-child[style*="rgb(255, 75, 75)"] {background-color:#0ea5e9 !important;}
-div[data-baseweb="slider"] div[role="slider"] {background-color:#0ea5e9 !important;}
-div[data-testid="stSliderThumbValue"] {color:#0284c7 !important;}
-a {color:#0284c7;}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -1910,12 +1892,10 @@ with t5:
     else:
         _mdf = pd.DataFrame({
             "티커": _msyms,
-            "종목명": [NAME_MAP.get(t, "-") for t in _msyms],
             "메모": [S["memos"].get(t, "") for t in _msyms],
         })
         _mcfg = {
             "티커": st.column_config.TextColumn("티커", width="small", disabled=True),
-            "종목명": st.column_config.TextColumn("종목명", width="small", disabled=True),
             "메모": st.column_config.TextColumn("메모", width="large", max_chars=500),
         }
         try:
