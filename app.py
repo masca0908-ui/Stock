@@ -1,3 +1,4 @@
+import hashlib
 
 # -*- coding: utf-8 -*-
 # Stock 대시보드 (야후 파이낸스 기반)
@@ -28,7 +29,7 @@ hr {margin: .7rem 0 !important;}
 @media (max-width: 820px) {
   .block-container {padding-left: .7rem !important; padding-right: 2.6rem !important;}
 }
-/* ---- 하늘색: 조회하기·찾기 시작·분석하기 같은 주 버튼만 ---- */
+/* ---- 주 버튼(조회하기·찾기 시작·분석하기)만 하늘색 ---- */
 button[kind="primary"], button[data-testid="stBaseButton-primary"] {
   background-color:#0ea5e9 !important; border-color:#0ea5e9 !important; color:#ffffff !important;}
 button[kind="primary"]:hover, button[data-testid="stBaseButton-primary"]:hover {
@@ -1887,12 +1888,32 @@ with t5:
     else:
         _msyms = parse_list(S["lists"].get(_mp, ""))
 
-    if not _msyms:
+    # 표에 넣는 바탕 자료를 "목록이 바뀔 때만" 새로 만들어 고정해 둡니다.
+    # (메모를 쓸 때마다 바탕 자료가 바뀌면 줄 순서가 흔들릴 수 있어서)
+    _msig = _mp + "|" + ",".join(_msyms)
+    _mkey = "memo_ed_" + hashlib.md5(_msig.encode("utf-8")).hexdigest()[:12]
+    _mbase = st.session_state.get("_memo_base")
+    if not isinstance(_mbase, dict) or _mbase.get("sig") != _msig:
+        _mbase_syms = list(_msyms)
+        _mbase = {
+            "sig": _msig,
+            "syms": _mbase_syms,
+            "memos": [S["memos"].get(t, "") for t in _mbase_syms],
+        }
+        st.session_state["_memo_base"] = _mbase
+        # 목록을 바꾸면 예전 편집 기록을 지우고 새로 그립니다
+        for _k in [k for k in list(st.session_state.keys()) if str(k).startswith("memo_ed_")]:
+            try:
+                del st.session_state[_k]
+            except Exception:
+                pass
+
+    if not _mbase["syms"]:
         st.info("이 목록에 종목이 없습니다. 종목은 ① 탭에서 넣을 수 있습니다.")
     else:
         _mdf = pd.DataFrame({
-            "티커": _msyms,
-            "메모": [S["memos"].get(t, "") for t in _msyms],
+            "티커": _mbase["syms"],
+            "메모": _mbase["memos"],
         })
         _mcfg = {
             "티커": st.column_config.TextColumn("티커", width="small", disabled=True),
@@ -1904,11 +1925,11 @@ with t5:
             pass
         _medited = st.data_editor(
             _mdf,
-            key="memo_ed_%d" % (abs(hash(_mp)) % 100000000),
+            key=_mkey,
             hide_index=True,
             use_container_width=True,
             num_rows="fixed",
-            height=38 + 35 * len(_msyms),
+            height=38 + 35 * len(_mbase["syms"]),
             column_config=_mcfg,
         )
         _changed = False
