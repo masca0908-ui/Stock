@@ -95,6 +95,9 @@ COL_GROUPS = {
                  "추정상향(30일)", "추정하향(30일)"],
     "수익성·안정성": ["ROE(%)", "영업이익률(%)", "순이익률(%)", "부채비율(%)",
                      "순부채/EBITDA", "이자보상배율"],
+    "재무 성장(실적)": ["매출성장 1년(%)", "영업이익성장 1년(%)", "순이익성장 1년(%)",
+                       "영업이익성장 3년(연,%)", "영업이익성장 분기(%)",
+                       "영업이익률변화(%p)", "ROE변화(%p)"],
     "현금흐름": ["FCF(B)", "FCF수익률(%)", "FCF마진(%)", "현금전환율(%)"],
     "주주환원": ["배당수익률(%)", "자사주(B)", "자사주수익률(%)", "총주주환원율(%)", "주식수변동(%)"],
     "애널리스트": ["목표주가($)", "상승여력(%)", "애널리스트수", "매수의견", "보유의견", "매도의견",
@@ -113,7 +116,12 @@ DEFAULT_PRESETS = {
     "재무": ["ROE(%)", "영업이익률(%)", "순이익률(%)", "부채비율(%)", "순부채/EBITDA",
             "이자보상배율", "FCF(B)", "FCF수익률(%)", "FCF마진(%)", "배당수익률(%)",
             "총주주환원율(%)"],
+    "재무성장": ["매출성장 1년(%)", "영업이익성장 1년(%)", "순이익성장 1년(%)",
+               "영업이익성장 3년(연,%)", "영업이익성장 분기(%)", "영업이익률(%)",
+               "영업이익률변화(%p)", "ROE(%)", "ROE변화(%p)"],
 }
+# 나중에 새로 추가한 기본 세트: 이미 쓰던 사람 설정에도 한 번만 끼워 넣음
+NEW_PRESETS = [("재무성장", "재무", "fin_growth_v1")]
 
 def table_height(n):
     """휴대폰 한 화면에 머리글 + 약 11줄이 보이는 높이"""
@@ -133,6 +141,9 @@ FMT = {
     "총주주환원율(%)": "{:.2f}", "주식수변동(%)": "{:+.2f}",
     "목표주가($)": "{:,.2f}", "상승여력(%)": "{:+.1f}", "애널리스트수": "{:.0f}",
     "매수의견": "{:.0f}", "보유의견": "{:.0f}", "매도의견": "{:.0f}", "매수비율(%)": "{:.0f}",
+    "매출성장 1년(%)": "{:+.1f}", "영업이익성장 1년(%)": "{:+.1f}", "순이익성장 1년(%)": "{:+.1f}",
+    "영업이익성장 3년(연,%)": "{:+.1f}", "영업이익성장 분기(%)": "{:+.1f}",
+    "영업이익률변화(%p)": "{:+.1f}", "ROE변화(%p)": "{:+.1f}",
 }
 
 # (방향, 좋음기준, 나쁨기준)  방향 high = 클수록 좋음
@@ -152,6 +163,10 @@ TH = {
     "총주주환원율(%)": ("high", 4, 1), "주식수변동(%)": ("low", -1, 1),
     "상승여력(%)": ("high", 20, 0), "애널리스트수": ("high", 15, 3),
     "매수비율(%)": ("high", 70, 40),
+    "매출성장 1년(%)": ("high", 10, 0), "영업이익성장 1년(%)": ("high", 10, 0),
+    "순이익성장 1년(%)": ("high", 10, 0), "영업이익성장 3년(연,%)": ("high", 10, 0),
+    "영업이익성장 분기(%)": ("high", 10, 0),
+    "영업이익률변화(%p)": ("high", 1, -1), "ROE변화(%p)": ("high", 1, -1),
 }
 
 # ============================================================
@@ -176,6 +191,7 @@ DEFAULT_SETTINGS = {
     "sort_desc": True,
     "presets": DEFAULT_PRESETS,
     "memos": {},
+    "migr": [m for _, _, m in NEW_PRESETS],
 }
 
 def _get_ls():
@@ -261,6 +277,27 @@ def _clean(raw):
     if isinstance(mm, dict):
         out["memos"] = {str(k).strip().upper(): str(v) for k, v in mm.items()
                         if str(k).strip() and str(v).strip()}
+    # 새로 추가된 기본 세트/항목을 예전 설정에 한 번만 반영
+    mg = raw.get("migr")
+    done = [str(x) for x in mg] if isinstance(mg, list) else []
+    for _pname, _after, _mark in NEW_PRESETS:
+        if _mark in done:
+            continue
+        done.append(_mark)
+        if _pname not in out["presets"]:
+            new_ps = {}
+            for k, v in out["presets"].items():
+                new_ps[k] = v
+                if k == _after:
+                    new_ps[_pname] = list(DEFAULT_PRESETS[_pname])
+            if _pname not in new_ps:
+                new_ps[_pname] = list(DEFAULT_PRESETS[_pname])
+            out["presets"] = new_ps
+        # 새 항목은 처음엔 표에서 숨겨 둠 (세트 버튼으로 켜면 됨)
+        if isinstance(hd, list):
+            out["hide"] = out["hide"] + [c for c in COL_GROUPS["재무 성장(실적)"]
+                                         if c not in out["hide"]]
+    out["migr"] = done
     return out
 
 # ---------- 기기 간 공유 (GitHub 비밀 메모장 = Gist) ----------
@@ -474,6 +511,74 @@ def _row_val(df, names, col=0):
     except Exception:
         return None
     return None
+
+def _row_series(df, names):
+    """재무제표에서 한 줄을 날짜 최신순으로 꺼냄 (빈 값 제외)"""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return None
+        for n in names:
+            if n in df.index:
+                ser = pd.to_numeric(df.loc[n], errors="coerce").dropna()
+                if len(ser):
+                    ser.index = pd.to_datetime(ser.index)
+                    return ser.sort_index(ascending=False)
+    except Exception:
+        return None
+    return None
+
+def _ago(ser, days_lo, days_hi):
+    """맨 앞(최신) 값과, 그보다 days_lo~days_hi일 전의 값을 돌려줌"""
+    if ser is None or len(ser) < 2:
+        return None, None
+    t0 = ser.index[0]
+    for t, v in ser.iloc[1:].items():
+        gap = (t0 - t).days
+        if days_lo <= gap <= days_hi:
+            return _f(ser.iloc[0]), _f(v)
+    return None, None
+
+def _growth(new, old):
+    """성장률(%). 예전 값이 0 이하(적자)면 계산하지 않음"""
+    if new is None or old is None or old <= 0:
+        return None
+    return (new / old - 1.0) * 100.0
+
+def _ratio_change(num, den):
+    """최근 연도 비율(%) - 전년 비율(%)  (단위: %p)"""
+    if num is None or den is None:
+        return None
+    both = [t for t in num.index if t in den.index]
+    both = sorted(both, reverse=True)
+    vals = []
+    for t in both:
+        dv = _f(den.loc[t])
+        nv = _f(num.loc[t])
+        if dv and dv > 0 and nv is not None:
+            vals.append((t, nv / dv * 100.0))
+    if len(vals) < 2:
+        return None
+    gap = (vals[0][0] - vals[1][0]).days
+    if not (300 <= gap <= 430):
+        return None
+    return vals[0][1] - vals[1][1]
+
+def _fin_growth(d, inc, bs, qinc):
+    rev_s = _row_series(inc, ["Total Revenue", "Operating Revenue"])
+    oi_s = _row_series(inc, ["Operating Income", "EBIT"])
+    ni_s = _row_series(inc, ["Net Income", "Net Income Common Stockholders"])
+    eq_s = _row_series(bs, ["Stockholders Equity", "Common Stock Equity",
+                            "Total Equity Gross Minority Interest"])
+    d["매출성장 1년(%)"] = _growth(*_ago(rev_s, 300, 430))
+    d["영업이익성장 1년(%)"] = _growth(*_ago(oi_s, 300, 430))
+    d["순이익성장 1년(%)"] = _growth(*_ago(ni_s, 300, 430))
+    n3, o3 = _ago(oi_s, 1000, 1200)
+    if n3 and o3 and n3 > 0 and o3 > 0:
+        d["영업이익성장 3년(연,%)"] = ((n3 / o3) ** (1.0 / 3.0) - 1.0) * 100.0
+    q_oi = _row_series(qinc, ["Operating Income", "EBIT"])
+    d["영업이익성장 분기(%)"] = _growth(*_ago(q_oi, 330, 400))
+    d["영업이익률변화(%p)"] = _ratio_change(oi_s, rev_s)
+    d["ROE변화(%p)"] = _ratio_change(ni_s, eq_s)
 
 def _row_sum4(df, names):
     try:
@@ -726,6 +831,12 @@ def _fetch_base(sym):
         d["순부채/EBITDA"] = (debt - (cash or 0)) / ebitda
     if ebit is not None and intexp and intexp > 0:
         d["이자보상배율"] = ebit / abs(intexp)
+
+    # 재무 성장 (실제 실적 기준) - 이미 받은 재무제표로 계산, 추가 요청 없음
+    try:
+        _fin_growth(d, inc, bs, qinc)
+    except Exception:
+        pass
 
     # 현금흐름
     fcf = fcf_rep
@@ -1229,6 +1340,12 @@ with st.sidebar:
 - **주식수변동** 마이너스여야 내 지분이 늘어남
 - **매수/보유/매도의견** 애널리스트 의견별 인원 (이번 달 기준)
 - **매수비율** 전체 의견 중 매수 비율. 70% 이상이면 강한 매수 분위기
+- **매출·영업이익·순이익성장 1년** 가장 최근 회계연도 실적이 전년보다 몇 % 늘었는지 (예상치 아님, 실제 실적)
+- **영업이익성장 3년(연)** 3년 동안 영업이익이 해마다 평균 몇 %씩 늘었는지
+- **영업이익성장 분기** 가장 최근 분기 영업이익을 작년 같은 분기와 비교. 요즘 흐름을 볼 때
+- **영업이익률변화(%p)** 영업이익률이 전년보다 몇 %포인트 올랐는지. 플러스면 장사가 더 남는 쪽으로 좋아지는 중
+- **ROE변화(%p)** ROE가 전년보다 몇 %포인트 올랐는지
+- 예전 값이 적자(0 이하)였으면 성장률을 계산할 수 없어 빈칸으로 나옵니다
         """)
 
     with st.expander("신호등 색 기준", expanded=False):
@@ -1603,6 +1720,19 @@ with t2:
                 st.dataframe(g2.style.format({"값": "{:,.2f}"}, na_rep="-"),
                              hide_index=True, use_container_width=True)
                 st.caption("주식수 변동이 마이너스여야 내 지분이 실제로 늘어납니다.")
+
+            st.markdown("**재무 성장 (실제 실적, 사업성이 좋아지는지)**")
+            g3 = pd.DataFrame([
+                {"구분": "매출 성장 1년(%)", "값": d.get("매출성장 1년(%)")},
+                {"구분": "영업이익 성장 1년(%)", "값": d.get("영업이익성장 1년(%)")},
+                {"구분": "순이익 성장 1년(%)", "값": d.get("순이익성장 1년(%)")},
+                {"구분": "영업이익 성장 3년 연평균(%)", "값": d.get("영업이익성장 3년(연,%)")},
+                {"구분": "영업이익 성장 최근분기(작년 같은 분기 대비, %)", "값": d.get("영업이익성장 분기(%)")},
+                {"구분": "영업이익률 변화(%p)", "값": d.get("영업이익률변화(%p)")},
+                {"구분": "ROE 변화(%p)", "값": d.get("ROE변화(%p)")},
+            ])
+            st.dataframe(g3.style.format({"값": "{:+.1f}"}, na_rep="-"),
+                         hide_index=True, use_container_width=True)
 
             st.divider()
             try:
